@@ -2,10 +2,11 @@ package pubsub
 
 import (
 	"context"
-	"fmt"
 	"sync"
+	"time"
 
 	ps "cloud.google.com/go/pubsub"
+	gcppubsubazure "github.com/jbvmio/gcp-pubsub-azure"
 	"go.uber.org/zap"
 )
 
@@ -16,14 +17,15 @@ type Client struct {
 	psClient     *ps.Client
 	projectID    string
 	subscription string
-	logger       *zap.Logger
+	dataChan     chan []byte
 	stopped      chan struct{}
+	logger       *zap.Logger
 	wg           sync.WaitGroup
 }
 
-func NewClient(projectID, subscription string, L *zap.Logger) (*Client, error) {
+func NewClient(config gcppubsubazure.GCPConfig, L *zap.Logger) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	client, err := ps.NewClient(ctx, projectID)
+	client, err := ps.NewClient(ctx, config.Project)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -32,10 +34,11 @@ func NewClient(projectID, subscription string, L *zap.Logger) (*Client, error) {
 		ctx:          ctx,
 		cancel:       cancel,
 		psClient:     client,
-		projectID:    projectID,
-		subscription: subscription,
-		logger:       L.With(zap.String("process", "GCP PubSub Client")),
+		projectID:    config.Project,
+		subscription: config.Subscription,
+		dataChan:     make(chan []byte, 1000),
 		stopped:      make(chan struct{}),
+		logger:       L.With(zap.String("process", "GCP PubSub Client")),
 		wg:           sync.WaitGroup{},
 	}, nil
 }
@@ -56,19 +59,28 @@ func (c *Client) Stopped() <-chan struct{} {
 	return c.stopped
 }
 
+func (c *Client) Data() <-chan []byte {
+	return c.dataChan
+}
+
 func (c *Client) consumeSubscription() {
 	c.wg.Add(1)
 	go func() {
-		defer c.wg.Done()
 		defer close(c.stopped)
 		c.logger.Info("consuming from pub/sub", zap.String("subscription", c.subscription))
 		sub := c.psClient.Subscription(c.subscription)
 		err := sub.Receive(c.ctx, func(ctx context.Context, m *ps.Message) {
-			fmt.Printf("ID:      %+v\n", m.ID)
-			fmt.Printf("PubTime: %+v\n", m.PublishTime)
-			fmt.Printf("ATTR:    %+v\n", m.Attributes)
-			fmt.Printf("Data:\n%s\n\n", m.Data)
-			m.Ack() // Acknowledge that we've consumed the message.
+			to, nm := context.WithTimeout(ctx, time.Second*10)
+			defer nm()
+			select {
+			case <-c.ctx.Done():
+				c.wg.Done()
+			case <-to.Done():
+				c.logger.Error("timed out sending event", zap.String("ID", m.ID))
+				m.Nack()
+			case c.dataChan <- m.Data:
+				m.Ack() // Acknowledge that we've consumed the message.
+			}
 		})
 		if err != nil {
 			c.logger.Error("error consuming subscription", zap.Error(err))
