@@ -66,24 +66,31 @@ func (c *Client) Data() <-chan []byte {
 func (c *Client) consumeSubscription() {
 	c.wg.Add(1)
 	go func() {
+		defer c.wg.Done()
+		defer close(c.dataChan)
 		defer close(c.stopped)
 		c.logger.Info("consuming from pub/sub", zap.String("subscription", c.subscription))
 		sub := c.psClient.Subscription(c.subscription)
 		err := sub.Receive(c.ctx, func(ctx context.Context, m *ps.Message) {
-			to, nm := context.WithTimeout(ctx, time.Second*10)
+			to, nm := context.WithTimeout(ctx, time.Second*30)
 			defer nm()
 			select {
-			case <-c.ctx.Done():
-				c.wg.Done()
 			case <-to.Done():
-				c.logger.Error("timed out sending event", zap.String("ID", m.ID))
+				switch {
+				case c.ctx.Err() == context.Canceled:
+					c.logger.Debug("context has been cancelled", zap.String("ID", m.ID))
+				default:
+					c.logger.Error("timed out sending event", zap.String("ID", m.ID))
+				}
 				m.Nack()
 			case c.dataChan <- m.Data:
+				c.logger.Debug("sending event", zap.String("ID", m.ID))
 				m.Ack() // Acknowledge that we've consumed the message.
 			}
 		})
 		if err != nil {
 			c.logger.Error("error consuming subscription", zap.Error(err))
 		}
+		c.logger.Warn("stopped consuming from pub/sub", zap.String("subscription", c.subscription))
 	}()
 }

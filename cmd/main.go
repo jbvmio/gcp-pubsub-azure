@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
 	gcppubsubazure "github.com/jbvmio/gcp-pubsub-azure"
 	"github.com/jbvmio/gcp-pubsub-azure/internal"
@@ -18,11 +21,17 @@ var (
 	configPath string
 	buildTime  string
 	commitHash string
+	logLevel   string
+	threads    int
+	showQueue  int64
 )
 
 func main() {
 	pf := pflag.NewFlagSet(`gcp-pubsub-azure`, pflag.ExitOnError)
 	pf.StringVarP(&configPath, "config", "c", "", "Path to Config")
+	pf.IntVar(&threads, "threads", 1, "Number of Sender Threads to Azure")
+	pf.Int64Var(&showQueue, "show-queue", 30, "Interval to Print Current Queue - 0 to disable")
+	pf.StringVarP(&logLevel, "log-level", "l", "info", "Set Log Level")
 	showVer := pf.Bool("version", false, "Show version and exit.")
 	pf.Parse(os.Args[1:])
 	if *showVer {
@@ -32,7 +41,7 @@ func main() {
 		return
 	}
 
-	logger := internal.ConfigureLogger("info", os.Stdout)
+	logger := internal.ConfigureLogger(logLevel, os.Stdout)
 	defer logger.Sync()
 	L := logger.With(zap.String("process", "gcp-pubsub-azure"))
 	L.Info("starting", zap.String(`Version`, buildTime), zap.String(`Commit`, commitHash))
@@ -68,59 +77,76 @@ func main() {
 		L.Fatal("error initializing GCP client")
 	}
 
-	azureClient := loganalytics.NewClient(config.Azure, logger)
-	parser := gcppubsubazure.NewParser(config.ExcludeFilter, logger)
-
+	ctx := context.Background()
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	launchProcessors(threads, config, gcpClient.Data(), logger, nil)
+	if showQueue > 0 {
+		go printQueue(ctx, gcpClient.Data(), showQueue, logger)
+	}
 	gcpClient.Start()
 
-runLoop:
-	for {
-		select {
-		case <-sigChan:
-			gcpClient.Stop()
-			break runLoop
-		case <-gcpClient.Stopped():
-			break runLoop
-		case d := <-gcpClient.Data():
-			data, err := parser.Parse(d)
-			switch {
-			case err != nil:
-				L.Error("Encountered Error Parsing Data")
-			case len(data) <= 1:
-			default:
-				azureClient.SendEvent(data)
-				if err != nil {
-					L.Error("could not send event", zap.Error(err))
-				} else {
-					L.Info("success")
-				}
-			}
-		}
+	select {
+	case <-sigChan:
+		gcpClient.Stop()
+	case <-gcpClient.Stopped():
 	}
+
 	L.Info("Draining Queue")
-	var drainQueue int
-	for drain := range gcpClient.Data() {
-		drainQueue++
-		data, err := parser.Parse(drain)
+	wg := sync.WaitGroup{}
+	launchProcessors(threads, config, gcpClient.Data(), logger, &wg)
+	wg.Wait()
+	L.Info("Drained Queue")
+	L.Warn("Stopped.")
+}
+
+func launchProcessors(threads int, config *gcppubsubazure.Config, eventChan <-chan []byte, logger *zap.Logger, wg *sync.WaitGroup) {
+	for i := 0; i < threads; i++ {
+		if wg != nil {
+			wg.Add(1)
+		}
+		go processEvents(config, eventChan, logger, wg)
+	}
+}
+
+func processEvents(config *gcppubsubazure.Config, eventChan <-chan []byte, logger *zap.Logger, wg *sync.WaitGroup) {
+	if wg != nil {
+		defer wg.Done()
+	}
+	L := logger.With(zap.String("process", "eventProcessor"))
+	azClient := loganalytics.NewClient(config.Azure, L)
+	parser := gcppubsubazure.NewParser(config.ExcludeFilter, L)
+	for d := range eventChan {
+		data, err := parser.Parse(d)
 		switch {
 		case err != nil:
 			L.Error("Encountered Error Parsing Data")
 		case len(data) <= 1:
+			L.Debug("dropping event")
 		default:
-			azureClient.SendEvent(data)
+			err := azClient.SendEvent(data)
 			if err != nil {
-				L.Error("could not send event", zap.Error(err))
+				L.Error("could not send event", zap.Error(err), zap.Int("queueSize", len(eventChan)))
 			} else {
-				L.Info("success")
+				L.Debug("success", zap.Int("queueSize", len(eventChan)))
 			}
 		}
-		fmt.Printf(".")
 	}
-	L.Info("Drained Queue", zap.Int("queue", drainQueue))
-	L.Warn("Stopped.")
+}
+
+func printQueue(ctx context.Context, dataChan <-chan []byte, secs int64, logger *zap.Logger) {
+	ticker := time.NewTicker(time.Second * time.Duration(secs))
+runLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			break runLoop
+		case <-ticker.C:
+			logger.Info("current queue size", zap.Int("queue", len(dataChan)))
+		}
+	}
+	logger.Debug("print queue stopped.")
 }
 
 // fileExists returns true if the file exists, false otherwise.
