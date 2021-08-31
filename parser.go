@@ -48,7 +48,7 @@ func (p *Parser) Parse(data []byte) ([]byte, error) {
 			switch {
 			case val != excludeVal:
 			case val == excludeVal:
-				if fmt.Sprintf("%v", val) == fmt.Sprintf("%v", excludeVal) {
+				if fmt.Sprintf("%v", v) == fmt.Sprintf("%v", match) {
 					return []byte{}, nil
 				}
 			}
