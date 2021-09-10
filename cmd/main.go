@@ -24,6 +24,7 @@ var (
 	logLevel   string
 	threads    int
 	showQueue  int64
+	testOnly   bool
 )
 
 func main() {
@@ -32,6 +33,7 @@ func main() {
 	pf.IntVar(&threads, "threads", 1, "Number of Sender Threads to Azure")
 	pf.Int64Var(&showQueue, "show-queue", 30, "Interval to Print Current Queue - 0 to disable")
 	pf.StringVarP(&logLevel, "log-level", "l", "info", "Set Log Level")
+	pf.BoolVarP(&testOnly, "test", "t", false, "Print to Terminal only, do not send to Azure")
 	showVer := pf.Bool("version", false, "Show version and exit.")
 	pf.Parse(os.Args[1:])
 	if *showVer {
@@ -81,7 +83,7 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	launchProcessors(threads, config, gcpClient.Data(), logger, nil)
+	launchProcessors(threads, config, gcpClient.Data(), logger, nil, testOnly)
 	if showQueue > 0 {
 		go printQueue(ctx, gcpClient.Data(), showQueue, logger)
 	}
@@ -95,22 +97,22 @@ func main() {
 
 	L.Info("Draining Queue")
 	wg := sync.WaitGroup{}
-	launchProcessors(threads, config, gcpClient.Data(), logger, &wg)
+	launchProcessors(threads, config, gcpClient.Data(), logger, &wg, testOnly)
 	wg.Wait()
 	L.Info("Drained Queue")
 	L.Warn("Stopped.")
 }
 
-func launchProcessors(threads int, config *gcppubsubazure.Config, eventChan <-chan []byte, logger *zap.Logger, wg *sync.WaitGroup) {
+func launchProcessors(threads int, config *gcppubsubazure.Config, eventChan <-chan []byte, logger *zap.Logger, wg *sync.WaitGroup, testOnly bool) {
 	for i := 0; i < threads; i++ {
 		if wg != nil {
 			wg.Add(1)
 		}
-		go processEvents(config, eventChan, logger, wg)
+		go processEvents(config, eventChan, logger, wg, testOnly)
 	}
 }
 
-func processEvents(config *gcppubsubazure.Config, eventChan <-chan []byte, logger *zap.Logger, wg *sync.WaitGroup) {
+func processEvents(config *gcppubsubazure.Config, eventChan <-chan []byte, logger *zap.Logger, wg *sync.WaitGroup, testOnly bool) {
 	if wg != nil {
 		defer wg.Done()
 	}
@@ -124,6 +126,8 @@ func processEvents(config *gcppubsubazure.Config, eventChan <-chan []byte, logge
 			L.Error("Encountered Error Parsing Data")
 		case len(data) <= 1:
 			L.Debug("dropping event")
+		case testOnly:
+			fmt.Printf("%s\n", data)
 		default:
 			err := azClient.SendEvent(data)
 			if err != nil {
