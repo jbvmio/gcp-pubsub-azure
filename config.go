@@ -25,6 +25,7 @@ type AzureConfig struct {
 	ResourceGroup  string `yaml:"resourceGroup"`
 	TimestampField string `yaml:"timestampField"`
 	LogType        string `yaml:"logType"`
+	LogTypeField   string `yaml:"logTypeField"`
 }
 
 // GetConfig .

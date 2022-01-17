@@ -118,9 +118,12 @@ func processEvents(config *gcppubsubazure.Config, eventChan <-chan []byte, logge
 	}
 	L := logger.With(zap.String("process", "eventProcessor"))
 	azClient := loganalytics.NewClient(config.Azure, L)
-	parser := gcppubsubazure.NewParser(config.ExcludeFilter, L)
+	parser := gcppubsubazure.NewParser(config.Azure.LogTypeField, config.ExcludeFilter, L)
 	for d := range eventChan {
-		data, err := parser.Parse(d)
+		data, ltv, err := parser.Parse(d)
+		if ltv == "" {
+			ltv = config.Azure.LogType
+		}
 		switch {
 		case err != nil:
 			L.Error("Encountered Error Parsing Data")
@@ -129,7 +132,7 @@ func processEvents(config *gcppubsubazure.Config, eventChan <-chan []byte, logge
 		case testOnly:
 			fmt.Printf("%s\n", data)
 		default:
-			err := azClient.SendEvent(data)
+			err := azClient.SendEvent(ltv, data)
 			if err != nil {
 				L.Error("could not send event", zap.Error(err), zap.Int("queueSize", len(eventChan)))
 			} else {

@@ -39,8 +39,8 @@ func NewClient(config gcppubsubazure.AzureConfig, L *zap.Logger) *Client {
 }
 
 // SendEvent .
-func (c *Client) SendEvent(data []byte) error {
-	req, err := c.makeRequest(data)
+func (c *Client) SendEvent(logType string, data []byte) error {
+	req, err := c.makeRequest(logType, data)
 	if err != nil {
 		return err
 	}
@@ -59,7 +59,10 @@ func (c *Client) SendEvent(data []byte) error {
 	return nil
 }
 
-func (c *Client) makeRequest(data []byte) (*http.Request, error) {
+func (c *Client) makeRequest(logType string, data []byte) (*http.Request, error) {
+	if logType == "" {
+		logType = c.config.LogType
+	}
 	dateString := strings.Replace(time.Now().UTC().Format(time.RFC1123), `UTC`, `GMT`, -1)
 	stringToHash := "POST\n" + strconv.Itoa(len(data)) + "\napplication/json\n" + "x-ms-date:" + dateString + "\n/api/logs"
 	hashedString, err := buildSignature(stringToHash, c.config.WorkspaceKey)
@@ -72,7 +75,7 @@ func (c *Client) makeRequest(data []byte) (*http.Request, error) {
 		return req, fmt.Errorf("error building signature")
 	}
 	signature := "SharedKey " + c.config.WorkspaceID + ":" + hashedString
-	req.Header.Add("Log-Type", c.config.LogType)
+	req.Header.Add("Log-Type", logType)
 	req.Header.Add("Authorization", signature)
 	req.Header.Add("Content-Type", "application/json")
 	req.Header.Add("x-ms-date", dateString)
