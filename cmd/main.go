@@ -130,7 +130,7 @@ func processEvents(config *gcppubsubazure.Config, eventChan <-chan []byte, logge
 		case len(data) <= 1:
 			L.Debug("dropping event")
 		case testOnly:
-			fmt.Printf("%s\n", data)
+			fmt.Printf("%s > %s\n", ltv, data)
 		default:
 			err := azClient.SendEvent(ltv, data)
 			if err != nil {
